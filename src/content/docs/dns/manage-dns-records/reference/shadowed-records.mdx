@@ -1,37 +1,33 @@
 ---
 title: Shadowed records
 pcx_content_type: concept
-description: Shadowed records are DNS records that exist in your zone but are never served because a subdomain delegation takes precedence. Learn how Cloudflare detects and annotates them.
+description: DNS records that exist in your zone but are never served because a subdomain delegation takes precedence over them.
+products:
+  - dns
 sidebar:
   order: 5
 ---
-
-# Shadowed records
 
 When you add an `NS` record to your zone, you create a **subdomain delegation**: you hand authority for that subdomain (and everything below it) to another set of nameservers. Any other records stored in your zone at or below that delegation point are **shadowed**: they stay in your zone, but Cloudflare never answers with them. Once authority is delegated, queries for that subdomain are referred to the external nameservers.
 
 When an `NS` record hides other records at or below it, we say the `NS` record is **shadowing** and the hidden records are **shadowed**. These are two perspectives on the same delegation, not separate situations.
 
-Shadowing is easy to introduce without realizing it. You might create a record under a subdomain and expect it to resolve, not knowing an `NS` delegation already shadows it. Or you might add an `NS` delegation without realizing it shadows records you already rely on, silently taking them out of service. Cloudflare does not block you from creating or modifying records regardless of shadow relationships. Shadowing is often intentional: [glue records](#glue-records) are shadowed by definition yet required for delegations to work, and a shadowed record becomes live again if you later remove the delegation above it, so it is valid to keep records in place ahead of or after a delegation change. Because Cloudflare cannot tell an intentional shadow from a mistake, it warns rather than blocks. Shadow metadata is how you catch the cases you did not intend: it tells you which records are shadowed, which `NS` records do the shadowing, and how many records a delegation hides.
+Shadowing is easy to introduce without realizing it. You might create a record under a subdomain expecting it to resolve, not knowing an `NS` delegation already shadows it. Or you might add an `NS` delegation without realizing it shadows records you already rely on. Cloudflare does not block you from creating or modifying records regardless of shadow relationships. Because Cloudflare cannot tell an intentional shadow from a mistake, it warns rather than blocks.
 
-This metadata is exposed in two places: as fields on API responses (covering whether a record is shadowed, whether it serves a special role as glue, and how many records a delegation hides) and as warnings in the Cloudflare dashboard on record creation and in the DNS record list.
-
-:::note
-Shadow metadata is computed on demand at read time and is never stored. It is not returned unless you explicitly request it. See [Request shadow metadata](#request-shadow-metadata) below.
-:::
+Shadow metadata tells you which records are shadowed, which `NS` records do the shadowing, and how many records a delegation hides. It is exposed as fields on API responses and as warnings in the Cloudflare dashboard. It is not returned unless you explicitly request it.
 
 ## Why shadowed records matter
 
 Shadowed records are invisible to DNS resolvers. Consider this example:
 
 ```txt
-sub.example.com    NS    ns1.externalprovider.com.
+sub.example.com    NS    ns1.example.org.
 www.sub.example.com  A   192.0.2.1
 ```
 
-You created the `A` record at `www.sub.example.com` expecting it to resolve, but the `NS` delegation at `sub.example.com` hands authority for everything at or below `sub.example.com` to the external nameservers. Resolvers follow that delegation and never return your `A` record. The record exists in your zone but has no effect, so it is shadowed.
+The `NS` delegation at `sub.example.com` hands authority for everything at or below it to the external nameservers. Resolvers follow that delegation and never return your `A` record. The record exists in your zone but has no effect.
 
-The problem cuts both ways. Adding an `NS` delegation can shadow records you already depend on, silently taking them out of service, and adding records under an existing delegation produces records that never resolve. In both cases nothing errors out, which is what makes shadow metadata useful for spotting the issue.
+The problem cuts both ways. Adding an `NS` delegation can shadow records you already depend on. Adding records under an existing delegation produces records that never resolve. In both cases nothing errors out, which is what makes shadow metadata useful for spotting the issue.
 
 Common situations that produce shadowed records:
 
@@ -68,130 +64,12 @@ ns1.a.sub.example.com  A   192.0.2.1
 
 The `A` record for `ns1.a.sub.example.com` looks like glue for the `a.sub` delegation. However, the shallower `sub.example.com` delegation intercepts all queries for anything under `sub.example.com`, including `a.sub.example.com`. The parent zone never gets to serve the glue for `ns1.a.sub.example.com`, so it is dead.
 
-Dead glue does not cause resolution failures, but it is a record in your zone that has no effect, and knowing about it points you to one of two things. Either the glue is a leftover you can safely remove, or it is a signal that the shallower delegation is wrong: if you intended the deeper subdomain to be reachable through this zone, the shallower delegation that takes authority away from it may have been created in error.
+Dead glue does not cause resolution failures. It is either a leftover you can safely remove, or a signal that the shallower delegation was created in error.
 
 :::caution
 Before removing a record flagged as dead glue, verify that the external nameserver for the shallower delegation (`sub.example.com` in the example above) already holds the correct records for the deeper subdomain.
 :::
 
-## Shadow metadata fields
+## Related resources
 
-The following fields are present in each record's `meta` object if applicable:
-
-### `shadowed_by`
-
-Type: array of strings (record IDs)
-
-Present on any record that is hidden by one or more `NS` delegations. The array contains the IDs of the `NS` records whose delegations shadow this record. Multiple IDs appear when:
-
-- Several `NS` records share the same delegation name (multiple nameservers for the same cut point), or
-- Delegations exist at more than one parent level above the record.
-
-`shadowed_by` is always present on glue records, because glue records are shadowed by definition.
-
-Apex records (records whose name equals the zone name) are never shadowed and never carry this field.
-
-An `NS` record at the same name as a delegation is not considered shadowed by that delegation — it is the delegation. It can carry `shadowed_by` only when a delegation exists at a shallower parent level.
-
-### `is_glue`
-
-Type: boolean
-
-Present and set to `true` on `A` or `AAAA` records whose name matches the target of one of the `NS` records that shadows them. These records are required glue for the delegation.
-
-This field is omitted when the record is not glue.
-
-### `dead_glue`
-
-Type: boolean
-
-Present and set to `true` on glue records that are never actually served, because a shallower delegation intercepts authority before the zone can answer for that name. A record with `dead_glue: true` also carries `is_glue: true`.
-
-This field is omitted when the record is live glue or is not glue at all.
-
-### `shadowed_records_count`
-
-Type: integer
-
-Present on non-apex `NS` records that form a delegation. Reports how many records in the zone are shadowed by that delegation (records at or below the delegation name, excluding the delegation's own `NS` records and hidden records).
-
-The count is capped at 10,000. A value of 10,000 means "at least 10,000". The field is omitted when the count is zero.
-
-## Request shadow metadata
-
-Add `include_shadow_metadata=true` to any DNS records API request:
-
-```sh
-curl "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?include_shadow_metadata=true" \
-  --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN"
-```
-
-Shadow metadata is available on all record API responses: individual record reads, create and update responses, list requests, and batch requests. For list and batch requests, shadow metadata is computed only when the page or batch contains 1,000 records or fewer. Requests above that limit return records without shadow metadata.
-
-### Filter by delegated name
-
-To list only the records shadowed by a specific delegation, pass `shadowed_by_name` together with `include_shadow_metadata=true`:
-
-```sh
-curl "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?include_shadow_metadata=true&shadowed_by_name=sub.example.com" \
-  --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN"
-```
-
-The value must be a subdomain of the zone (not the zone apex). The filter returns all records at or below that name. The `NS` records at exactly the delegation name are excluded (they form the delegation, not the shadowed set). `NS` records at names below the delegation — for example, a further delegation at `a.sub.example.com` when filtering by `sub.example.com` — are themselves shadowed and are included.
-
-:::note
-`shadowed_by_name` requires `include_shadow_metadata=true`. Supplying `shadowed_by_name` without it returns an error.
-:::
-
-## Example response
-
-The following is an excerpt showing shadow metadata fields on three records in a zone containing:
-
-```txt
-sub.example.com       NS    ns1.sub.example.com.
-ns1.sub.example.com   A     192.0.2.1
-www.sub.example.com   A     192.0.2.2
-```
-
-```json
-[
-  {
-    "type": "NS",
-    "name": "sub.example.com",
-    "content": "ns1.sub.example.com.",
-    "meta": {
-      "shadowed_records_count": 2
-    }
-  },
-  {
-    "type": "A",
-    "name": "ns1.sub.example.com",
-    "content": "192.0.2.1",
-    "meta": {
-      "shadowed_by": ["<ns-record-id>"],
-      "is_glue": true
-    }
-  },
-  {
-    "type": "A",
-    "name": "www.sub.example.com",
-    "content": "192.0.2.2",
-    "meta": {
-      "shadowed_by": ["<NS_RECORD_ID>"]
-    }
-  }
-]
-```
-
-The `NS` record carries `shadowed_records_count: 2` (two records are shadowed by it). The glue `A` record carries both `shadowed_by` and `is_glue: true`. The non-glue `A` record carries only `shadowed_by`.
-
-## Field availability summary
-
-| Record type | `shadowed_by` | `is_glue` | `dead_glue` | `shadowed_records_count` |
-|-------------|--------------|-----------|-------------|--------------------------|
-| `A` | Yes, if below a delegation | Yes, if name matches NS target | Yes, if also glue and orphaned | No |
-| `AAAA` | Yes, if below a delegation | Yes, if name matches NS target | Yes, if also glue and orphaned | No |
-| `NS` (apex) | No | No | No | No |
-| `NS` (non-apex, at delegation name) | No | No | No | Yes |
-| `NS` (non-apex, below a delegation) | Yes | No | No | No |
-| `CNAME`, `MX`, `TXT`, `SRV`, `CAA`, `HTTPS`, `SVCB` | Yes, if below a delegation | No | No | No |
+- [Shadow metadata fields](/dns/manage-dns-records/reference/shadow-metadata/) — field definitions, edge cases, and availability by record type.
